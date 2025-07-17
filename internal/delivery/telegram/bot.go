@@ -4,6 +4,7 @@ import (
 	"KinopoiskTwoActors/configs"
 	"KinopoiskTwoActors/internal/repository/userState"
 	"KinopoiskTwoActors/internal/usecase"
+	"context"
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"log"
@@ -20,7 +21,7 @@ type Bot struct {
 	logger *slog.Logger
 }
 
-func NewBot(config *configs.Config, userStates *userState.UserStates, repo *usecase.ActorFilmRepository, log *slog.Logger) (*Bot, error) {
+func NewBot(ctx context.Context, config *configs.Config, userStates *userState.UserStates, repo *usecase.ActorFilmRepository, log *slog.Logger) (*Bot, error) {
 
 	api, err := tgbotapi.NewBotAPI(config.TG.Token)
 	api.Client = &http.Client{
@@ -80,6 +81,14 @@ func (b *Bot) Run() {
 			b.HandleSearchByTwoActors(update.Message.Chat.ID, text)
 		}
 	}
+}
+
+func (b *Bot) Stop(ctx context.Context) {
+	ids := b.userStates.GetCurrentStatesID()
+	for _, id := range ids {
+		b.SendMessage(id, "Connection closed")
+	}
+
 }
 
 func (b *Bot) AnswerCallbackQuery(callbackID string, text string) error {

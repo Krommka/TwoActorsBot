@@ -1,5 +1,7 @@
 package domain
 
+import ()
+
 type BotHandler interface {
 	HandleCommand(chatID int64, command string, query string) (string, error)
 	SendMessage(chatID int64, text string) error

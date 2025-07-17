@@ -16,7 +16,7 @@ import (
 )
 
 func (b *Bot) getCorrelationID(chatID int64) string {
-	state := b.userStates.GetUserState(chatID)
+	state := b.userStates.GetByID(chatID)
 	if state.CorrelationID == "" {
 		state.CorrelationID = generateCorrelationID()
 	}
@@ -62,7 +62,7 @@ func (b *Bot) HandleCommand(chatID int64, command string, query string) error {
 }
 
 func (b *Bot) handleStart(chatID int64) error {
-	state := b.userStates.GetUserState(chatID)
+	state := b.userStates.GetByID(chatID)
 	prometheus.ActiveUsers.Inc()
 	*state = userState.State{
 		Step: "first_actor",
@@ -78,7 +78,7 @@ func (b *Bot) handleHelp(chatID int64) error {
 func (b *Bot) HandleSearchByTwoActors(chatID int64, query string) error {
 
 	const op = "BotHandler.HandleCommand"
-	state := b.userStates.GetUserState(chatID)
+	state := b.userStates.GetByID(chatID)
 
 	switch state.Step {
 	case "first_actor", "second_actor":
@@ -121,7 +121,7 @@ func (b *Bot) HandleCallback(chatID int64, data string, callbackID string, callb
 func (b *Bot) searchActor(chatID int64, query string) error {
 	const op = "BotHandler.searchActor"
 
-	state := b.userStates.GetUserState(chatID)
+	state := b.userStates.GetByID(chatID)
 
 	if len(query) == 0 {
 		return b.wrapError(chatID, op, "не указано имя", nil)
@@ -190,7 +190,7 @@ func (b *Bot) sendActorSelection(chatID int64, actors []domain.PhotoData) error 
 }
 
 func (b *Bot) handleActorSelection(chatID int64, actorID int) error {
-	state := b.userStates.GetUserState(chatID)
+	state := b.userStates.GetByID(chatID)
 	if err := b.ClearPreviousMedia(chatID); err != nil {
 		log.Printf("Ошибка очистки медиа: %v", err)
 	}
@@ -345,13 +345,13 @@ func (b *Bot) SendActorWithPhoto(chatID int64, photo domain.PhotoData) (int, err
 	if err != nil {
 		return 0, err
 	}
-	state := b.userStates.GetUserState(chatID)
+	state := b.userStates.GetByID(chatID)
 	state.SentMediaMessages = append(state.SentMediaMessages, sentMsg.MessageID)
 	return sentMsg.MessageID, nil
 }
 
 func (b *Bot) ClearPreviousMedia(chatID int64) error {
-	state := b.userStates.GetUserState(chatID)
+	state := b.userStates.GetByID(chatID)
 
 	for _, msgID := range state.SentMediaMessages {
 		if err := b.DeletePhotoMessage(chatID, msgID); err != nil {

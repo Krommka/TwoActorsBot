@@ -27,7 +27,20 @@ func NewUserStates() *UserStates {
 	}
 }
 
-func (s *UserStates) GetUserState(chatID int64) *State {
+func (s *UserStates) GetCurrentStatesID() []int64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	states := make([]int64, 0, 32)
+
+	for k, v := range s.states {
+		if v != nil {
+			states = append(states, k)
+		}
+	}
+	return states
+}
+
+func (s *UserStates) GetByID(chatID int64) *State {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
