@@ -1,0 +1,40 @@
+server:
+  http_listen_port: 9080
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: telegram-bot
+    static_configs:
+      - targets: [localhost]
+        labels:
+          job: telegram-bot
+          __path__: /var/log/telegram-bot.log
+    pipeline_stages:
+      # Парсим JSON-логи
+      - json:
+          expressions:
+            level: level
+            msg: msg
+            chat_id: chat_id
+            command: command
+            timestamp: time
+            correlation_id: correlation_id
+            source_function: source.function
+            source_file: source.file
+            source_line: source.line
+      # Добавляем метки (только level для избежания высокой кардинальности)
+      - labels:
+          level:
+      # Устанавливаем timestamp
+      - timestamp:
+          source: timestamp
+          format: RFC3339Nano  # Формат с наносекундами
+      # Опционально: добавляем дополнительные метки из контекста
+      - template:
+          source: correlation_id
+          template: '{{ .Value }}'

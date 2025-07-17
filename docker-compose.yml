@@ -1,0 +1,52 @@
+version: '3'
+
+services:
+  kinopoisk_bot:
+    build: .
+    env_file: .env
+    volumes:
+      - ./logs:/var/log
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    stop_grace_period: 10s
+
+  promtail:
+    image: grafana/promtail
+    ports:
+      - "9080:9080"
+    volumes:
+      - ./promtail-config.yml:/etc/promtail/config.yml
+      - ./logs:/var/log
+
+  loki:
+    image: grafana/loki
+    ports:
+      - "3100:3100"
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheusdata:/prometheus
+
+
+  grafana:
+    image: grafana/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - loki
+    volumes:
+      - grafanadata:/var/lib/grafana
+
+volumes:
+  grafanadata:
+  prometheusdata:
+
