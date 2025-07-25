@@ -59,4 +59,4 @@ Mkfile.old
 dkms.conf
 !go.mod
 coverage/
-.env
+profiling/.env

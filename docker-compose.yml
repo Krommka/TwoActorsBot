@@ -3,7 +3,7 @@ version: '3'
 services:
   kinopoisk_bot:
     build: .
-    env_file: .env
+    env_file: profiling/.env
     volumes:
       - ./logs:/var/log
     ports:
