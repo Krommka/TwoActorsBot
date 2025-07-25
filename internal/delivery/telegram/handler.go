@@ -2,282 +2,319 @@ package telegram
 
 import (
 	"KinopoiskTwoActors/internal/domain"
-	"KinopoiskTwoActors/internal/repository/userState"
 	"KinopoiskTwoActors/pkg/prometheus"
 	"context"
 	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"github.com/google/uuid"
-	"log"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
 )
 
-func (b *Bot) getCorrelationID(chatID int64) string {
-	state := b.userStates.GetByID(chatID)
-	if state.CorrelationID == "" {
-		state.CorrelationID = generateCorrelationID()
+const (
+	StepFirstActor        = "first_actor"
+	StepFirstActorSelect  = "first_actor_select"
+	StepSecondActor       = "second_actor"
+	StepSecondActorSelect = "second_actor_select"
+	StepCompleted         = "completed"
+	correlationIDKey      = "correlation_id"
+	chatIDKey             = "chat_id"
+	commandKey            = "command"
+	errorKey              = "error"
+	successKey            = "success"
+	queryKey              = "query"
+	delay                 = time.Millisecond * 100
+)
+
+func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
+	switch {
+	case update.CallbackQuery != nil:
+		b.handleCallback(ctx, update.CallbackQuery.Message.Chat.ID, update.CallbackQuery.Data,
+			update.CallbackQuery.ID, update.CallbackQuery.Message.MessageID)
+
+	case update.Message.IsCommand():
+		b.handleCommand(ctx, update.Message.Chat.ID, update.Message.Command(),
+			update.Message.CommandArguments())
+
+	case update.Message == nil:
+		return
+
+	default:
+		b.HandleSearchByTwoActors(ctx, update.Message.Chat.ID,
+			strings.TrimSpace(update.Message.Text))
 	}
-	return state.CorrelationID
 }
 
-func generateCorrelationID() string {
-	return uuid.New().String()
-}
-
-func (b *Bot) HandleCommand(chatID int64, command string, query string) error {
+func (b *Bot) handleCommand(ctx context.Context, chatID int64, command string, query string) {
 	startTime := time.Now()
 	defer func() {
 		prometheus.CommandDuration.WithLabelValues(command).Observe(time.Since(startTime).Seconds())
 	}()
 
-	status := "success"
+	status := successKey
 	defer func() {
 		prometheus.CommandCounter.WithLabelValues(command, status).Inc()
 	}()
 
-	const op = "BotHandler.HandleCommand"
-	ctx := context.WithValue(context.Background(), "correlation_id", generateCorrelationID())
+	ctx = context.WithValue(ctx, correlationIDKey, b.GetCorrelationID(ctx, chatID))
 
-	b.logger.Info(
-		"Command received",
-		"chat_id", chatID,
-		"command", command,
-		"correlation_id", ctx.Value("correlation_id").(string))
+	b.log.Info(
+		"Команда получена", chatIDKey, chatID, commandKey, command, queryKey, query,
+		correlationIDKey, ctx.Value(correlationIDKey))
 
 	switch command {
 	case "start":
-		return b.handleStart(chatID)
+		b.handleStart(ctx, chatID)
 	case "help":
-		return b.handleHelp(chatID)
+		b.handleHelp(ctx, chatID)
 	default:
-		if err := b.SendMessage(chatID, "Неизвестная команда.\nВведите /start для нового поиска"); err != nil {
-			log.Printf("%s: ошибка отправки сообщения в чат %d: %v", op, chatID, err)
-			status = "error"
-		}
-		return nil
+		status = errorKey
+		b.handleUnknown(ctx, chatID)
 	}
 }
 
-func (b *Bot) handleStart(chatID int64) error {
-	state := b.userStates.GetByID(chatID)
+func (b *Bot) handleStart(ctx context.Context, chatID int64) {
+	state := b.GetStateByID(ctx, chatID)
+	*state = domain.SessionState{
+		Step: StepFirstActor,
+	}
+	err := b.SetState(ctx, chatID, state)
+	if err != nil {
+		b.log.Error(
+			"Ошибка задания шага",
+			chatIDKey, chatID,
+			correlationIDKey, ctx.Value(correlationIDKey),
+			errorKey, err)
+	}
 	prometheus.ActiveUsers.Inc()
-	*state = userState.State{
-		Step: "first_actor",
-	}
-	return b.SendMessage(chatID, "Введите имя первого актера")
+	b.SendMessage(ctx, chatID, "Введите имя первого актера")
 }
 
-func (b *Bot) handleHelp(chatID int64) error {
-	return b.SendMessage(chatID, "Бот позволяет найти общие фильмы для двух актеров.\n"+
+func (b *Bot) handleHelp(ctx context.Context, chatID int64) {
+	b.SendMessage(ctx, chatID, "Бот позволяет найти общие фильмы для двух актеров.\n"+
 		"Для начала поиска нажмите /start")
 }
 
-func (b *Bot) HandleSearchByTwoActors(chatID int64, query string) error {
+func (b *Bot) handleUnknown(ctx context.Context, chatID int64) {
+	b.SendMessage(ctx, chatID, "Неизвестная команда.\nВведите /start для нового поиска")
+}
 
-	const op = "BotHandler.HandleCommand"
-	state := b.userStates.GetByID(chatID)
+func (b *Bot) HandleSearchByTwoActors(ctx context.Context, chatID int64, query string) {
+	state := b.GetStateByID(ctx, chatID)
+	startTime := time.Now()
+	defer func() {
+		prometheus.CommandDuration.WithLabelValues(state.Step).Observe(time.Since(startTime).
+			Seconds())
+	}()
+	ctx = context.WithValue(ctx, correlationIDKey, b.GetCorrelationID(ctx, chatID))
+
+	status := successKey
+	defer func() {
+		prometheus.CommandCounter.WithLabelValues("search", status).Inc()
+	}()
 
 	switch state.Step {
-	case "first_actor", "second_actor":
-		return b.searchActor(chatID, query)
-	default:
-		return b.SendMessage(chatID, "Введите /start для нового поиска")
-	}
-}
-
-func (b *Bot) HandleCallback(chatID int64, data string, callbackID string, callbackMessageID int) error {
-	if _, err := strconv.Atoi(data); err == nil {
-		actorID, _ := strconv.Atoi(data)
-		err := b.handleActorSelection(chatID, actorID)
+	case StepFirstActor, StepSecondActor:
+		err := b.handleActor(ctx, chatID, query)
 		if err != nil {
-			log.Println(err)
+			status = errorKey
+			b.log.Error(
+				"Ошибка обработки поиска актера",
+				chatIDKey, chatID,
+				queryKey, query,
+				correlationIDKey, ctx.Value(correlationIDKey),
+				errorKey, err)
+			b.ResetUserState(ctx, chatID)
+			b.SendMessage(ctx, chatID, "Произошла ошибка поиска. Введите /start для нового поиска")
 		}
-		answerText := ""
-		if err != nil {
-			answerText = "Ошибка выбора актера"
-			log.Printf("Error selecting actor: %v", err)
-
-		}
-		b.AnswerCallbackQuery(callbackID, answerText)
-
-		editMsg := tgbotapi.NewEditMessageReplyMarkup(
-			chatID,
-			callbackMessageID,
-			tgbotapi.NewInlineKeyboardMarkup(
-				tgbotapi.NewInlineKeyboardRow(
-					tgbotapi.NewInlineKeyboardButtonURL("Кинопоиск",
-						fmt.Sprintf("https://www.kinopoisk.ru/name/%d/", actorID)),
-				),
-			),
+		b.log.Info(
+			"Актеры успешно отправлены на выбор",
+			chatIDKey, chatID,
+			queryKey, query,
+			correlationIDKey, ctx.Value(correlationIDKey),
 		)
-		b.Send(editMsg)
+	default:
+		b.SendMessage(ctx, chatID, "Введите /start для нового поиска")
+		b.log.Debug(
+			"Ошибка шага",
+			chatIDKey, chatID,
+			"state.Step", state.Step,
+			queryKey, query,
+			correlationIDKey, ctx.Value(correlationIDKey),
+		)
 	}
-	return nil
 }
 
-func (b *Bot) searchActor(chatID int64, query string) error {
-	const op = "BotHandler.searchActor"
+func (b *Bot) handleActor(ctx context.Context, chatID int64, query string) error {
+	const op = "BotHandler.handleActor"
 
-	state := b.userStates.GetByID(chatID)
+	state := b.GetStateByID(ctx, chatID)
 
-	if len(query) == 0 {
-		return b.wrapError(chatID, op, "не указано имя", nil)
-	}
-
-	actors, err := b.repo.SearchActors(query)
+	actors, err := b.SearchActor(ctx, query)
 	if err != nil {
-		return b.wrapError(chatID, op, "ошибка поиска в usecase", err)
+		return fmt.Errorf("%s: Ошибка поиска актера %s: %w", op, query, err)
 	}
 
 	if len(actors) == 0 {
-		return b.wrapError(chatID, op, "актеры по указанному запросу не найдены. Начните заново", nil)
+		b.log.Info("Актеры не найдены", chatIDKey, chatID, queryKey, query, correlationIDKey,
+			ctx.Value(correlationIDKey))
+		return fmt.Errorf("%s: Актеры по запросу \"%s\"не найдены", op, query)
 	}
 
-	normalizedQuery := normalizeName(query)
-	filteredActors := make([]domain.Actor, 0)
-	for _, actor := range actors {
-		if normalizeName(actor.Name) == normalizedQuery ||
-			normalizeName(actor.EngName) == normalizedQuery {
-			filteredActors = append(filteredActors, actor)
-			break
-		}
-	}
+	state.TempActors = b.createPhotoData(actors)
 
-	if len(filteredActors) > 0 {
-		state.TempActors = preparePhoto(filteredActors)
+	if state.Step == StepFirstActor {
+		state.Step = StepFirstActorSelect
+	} else if state.Step == StepSecondActor {
+		state.Step = StepSecondActorSelect
 	} else {
-		state.TempActors = preparePhoto(actors)
+		state.Step = StepCompleted
 	}
 
-	if state.Step == "first_actor" {
-		state.Step = "first_actor_select"
-	} else if state.Step == "second_actor" {
-		state.Step = "second_actor_select"
-	} else {
-		state.Step = "complete"
+	b.log.Debug("Подготовлены к отправке на выбор:",
+		"state.TempActors", state.TempActors,
+		chatIDKey, chatID,
+		correlationIDKey, ctx.Value(correlationIDKey),
+	)
+
+	err = b.sendActors(ctx, chatID, state.TempActors)
+	if err != nil {
+		return fmt.Errorf("%s: Ошибка отправки актеров на выбор %s: %w", op, query, err)
 	}
 
-	return b.sendActorSelection(chatID, state.TempActors)
-
-}
-
-func normalizeName(name string) string {
-	name = strings.ToLower(strings.TrimSpace(name))
-	// Удаляем все не-буквенные символы для более гибкого сравнения
-	reg := regexp.MustCompile(`[^a-zа-яё]`)
-	return reg.ReplaceAllString(name, "")
-}
-
-func (b *Bot) sendActorSelection(chatID int64, actors []domain.PhotoData) error {
-	const op = "BotHandler.sendActorSelection"
-
-	if err := b.SendMessage(chatID, "Найдены"); err != nil {
-		log.Printf("%s: ошибка отправки сообщения в чат %d: %v", op, chatID, err)
-	}
-	log.Printf("Исходный массив:%v", actors)
-
-	for _, photo := range actors {
-		time.Sleep(100 * time.Millisecond)
-		if _, err := b.SendActorWithPhoto(chatID, photo); err != nil {
-			log.Printf("%s: ошибка отправки фото в чат %d: %v", op, chatID, err)
-		}
-	}
-	log.Printf("%s: Отправлен ответ в чат %d", op, chatID)
 	return nil
 }
 
-func (b *Bot) handleActorSelection(chatID int64, actorID int) error {
-	state := b.userStates.GetByID(chatID)
-	if err := b.ClearPreviousMedia(chatID); err != nil {
-		log.Printf("Ошибка очистки медиа: %v", err)
+func (b *Bot) sendActors(ctx context.Context, chatID int64, actors []domain.PhotoData) error {
+	const op = "BotHandler.sendActors"
+
+	b.SendMessage(ctx, chatID, "Найдены")
+
+	for _, photo := range actors {
+		if _, err := b.SendActorWithPhoto(ctx, chatID, photo); err != nil {
+			return fmt.Errorf("%s: ошибка отправки фото в чат %d: %v", op, chatID, err)
+		}
+		time.Sleep(delay)
+	}
+
+	return nil
+}
+
+func (b *Bot) SendActorWithPhoto(ctx context.Context, chatID int64,
+	photo domain.PhotoData) (int, error) {
+	data := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(photo.PhotoURL))
+	data.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("Ссылка", photo.ActorURL),
+			tgbotapi.NewInlineKeyboardButtonData("Выбрать",
+				strconv.Itoa(photo.ID)),
+		),
+	)
+	data.Caption = photo.Caption
+	sentMsg, err := b.Send(data)
+	if err != nil {
+		return 0, err
+	}
+	state := b.GetStateByID(ctx, chatID)
+	state.SentMediaMessages = append(state.SentMediaMessages, sentMsg.MessageID)
+	return sentMsg.MessageID, nil
+}
+
+func (b *Bot) handleActorSelection(ctx context.Context, chatID int64, actorID int) {
+	state := b.GetStateByID(ctx, chatID)
+	if err := b.ClearPreviousMedia(ctx, chatID); err != nil {
+		b.log.Error("Ошибка очистки медиа", err, chatIDKey, chatID, correlationIDKey,
+			ctx.Value(correlationIDKey))
 	}
 
 	switch state.Step {
-	case "first_actor_select":
+	case StepFirstActorSelect:
 		state.FirstActorID = actorID
-		state.Step = "second_actor"
-		return b.SendMessage(chatID, "Введите имя второго актера:")
+		state.Step = StepSecondActor
+		b.SendMessage(ctx, chatID, "Введите имя второго актера:")
 
-	case "second_actor_select":
+	case StepSecondActorSelect:
 		state.SecondActorID = actorID
-		state.Step = "completed"
-		return b.handleCommonMovies(chatID, state)
-
+		state.Step = StepCompleted
+		err := b.handleCommonMovies(ctx, chatID, state)
+		if err != nil {
+			b.ResetUserState(ctx, chatID)
+			b.log.Error("Ошибка обработки вывода фильмов", err, chatIDKey, chatID,
+				correlationIDKey, ctx.Value(correlationIDKey))
+		}
 	default:
-		return b.SendMessage(chatID, "Неверный выбор. Введите /start")
+		b.SendMessage(ctx, chatID, "Неверный выбор. Введите /start")
 	}
 }
-
-func (b *Bot) handleCommonMovies(chatID int64, state *userState.State) error {
-
-	if state.FirstActorID == state.SecondActorID {
-		b.SendMessage(chatID, "Актер задублирован")
-		return fmt.Errorf("актер задублирован")
+func (b *Bot) handleCallback(ctx context.Context, chatID int64, data string, callbackID string,
+	callbackMessageID int) {
+	const op = "BotHandler.handleCallback"
+	actorID, err := strconv.Atoi(data)
+	if err != nil {
+		b.log.Error(
+			"Ошибка конвертации ID актера",
+			chatIDKey, chatID,
+			correlationIDKey, ctx.Value(correlationIDKey),
+			errorKey, err)
+		b.SendMessage(ctx, chatID, "Произошла ошибка поиска. Введите /start для нового поиска")
+		b.ResetUserState(ctx, chatID)
+		return
 	}
+	ctx = context.WithValue(ctx, correlationIDKey, b.GetCorrelationID(ctx, chatID))
+	b.log.Info("Выбран актер", "actorID", actorID, chatIDKey, chatID, correlationIDKey,
+		ctx.Value(correlationIDKey))
+	b.handleActorSelection(ctx, chatID, actorID)
+	var answerText string
+	//if err != nil {
+	//	answerText = "Ошибка выбора актера"
+	//	log.Printf("Error selecting actor: %v", err)
+	//
+	//}
+	err = b.AnswerCallbackQuery(callbackID, answerText)
+	//if err != nil {
+	//
+	//}
 
-	commonMovies, err := b.getCommonMoviesID(state)
+	editMsg := tgbotapi.NewEditMessageReplyMarkup(
+		chatID,
+		callbackMessageID,
+		tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonURL("Ссылка",
+					fmt.Sprintf("https://www.kinopoisk.ru/name/%d/", actorID)),
+			),
+		),
+	)
+	b.Send(editMsg)
+}
+
+func (b *Bot) handleCommonMovies(ctx context.Context, chatID int64, state *domain.SessionState) error {
+
+	commonMovies, err := b.GetCommonMovies(ctx, state.FirstActorID, state.SecondActorID)
+
 	if err != nil {
 		return err
 	}
 
 	if len(commonMovies) == 0 {
-		b.SendMessage(chatID, "У актеров нет общих фильмов")
+		b.SendMessage(ctx, chatID, "У актеров нет общих фильмов")
 	} else if len(commonMovies) > 10 {
-		b.SendMessage(chatID, "Общих фильмов больше 10")
+		b.SendMessage(ctx, chatID, "Общих фильмов больше 10")
 	} else {
 		msg := fmt.Sprintf("Общие фильмы:")
-		b.SendMessage(chatID, msg)
+		b.SendMessage(ctx, chatID, msg)
 
-		for _, movieID := range commonMovies {
-			b.SendMovie(chatID, movieID)
+		for _, movie := range commonMovies {
+			b.SendMovie(chatID, movie)
 		}
 
 	}
-	b.userStates.ResetUserState(chatID)
+	b.ResetUserState(ctx, chatID)
 	prometheus.ActiveUsers.Dec()
 	return nil
 }
 
-func (b *Bot) getCommonMoviesID(state *userState.State) ([]int, error) {
-	movies1, err := b.repo.GetMoviesIDByActorID(state.FirstActorID)
-	if err != nil {
-		return nil, err
-	}
-	movies2, err := b.repo.GetMoviesIDByActorID(state.SecondActorID)
-	if err != nil {
-		return nil, err
-	}
-
-	commonMovies := findCommonMoviesID(movies1, movies2)
-	return commonMovies, nil
-}
-
-func findCommonMoviesID(movies1, movies2 []int) []int {
-	if len(movies1) == 0 || len(movies2) == 0 {
-		return nil
-	}
-
-	movieMap := make(map[int]bool)
-	for _, movie := range movies1 {
-		movieMap[movie] = true
-	}
-
-	common := make([]int, 0)
-	for _, movie := range movies2 {
-		if movieMap[movie] {
-			common = append(common, movie)
-			delete(movieMap, movie)
-		}
-	}
-	return common
-}
-
-func preparePhoto(actors []domain.Actor) []domain.PhotoData {
-	const op = "BotHandler.preparePhoto"
-
+func (b *Bot) createPhotoData(actors []domain.Actor) []domain.PhotoData {
 	if len(actors) == 0 {
 		return nil
 	}
@@ -289,82 +326,32 @@ func preparePhoto(actors []domain.Actor) []domain.PhotoData {
 			var err error
 			birthday, err = time.Parse(time.RFC3339, actor.Birthday)
 			if err != nil {
-				log.Printf("%s: ошибка парсинга даты", op)
+				b.log.Debug("Ошибка парсинга даты", err, "actor.Birthday", actor.Birthday)
 			}
 		}
-
-		if strings.HasPrefix(actor.Photo, "https:https://") {
-			actor.Photo = strings.TrimPrefix(actor.Photo, "https:")
-		}
-
 		photo := domain.PhotoData{
-			ID:      actor.ID,
-			URL:     actor.Photo,
-			Caption: fmt.Sprintf("%s (%s), %d", actor.Name, actor.EngName, birthday.Year()),
+			ID:       actor.ID,
+			PhotoURL: actor.PhotoURL,
+			ActorURL: actor.ActorURL,
+			Caption:  fmt.Sprintf("%s (%s), %d", actor.Name, actor.EngName, birthday.Year()),
 		}
-
 		response = append(response, photo)
 	}
-
 	return response
 }
 
-func (b *Bot) SendMovie(chatID int64, movieID int) error {
+func (b *Bot) SendMovie(chatID int64, movie domain.Movie) error {
 	const op = "BotHandler.sendMovie"
-	movie, err := b.repo.GetMovieByID(movieID)
-	if err != nil {
-		return fmt.Errorf("%s: %w", op, err)
-	}
 
-	data := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(movie.Poster))
-	link := fmt.Sprintf("https://www.kinopoisk.ru/film/%d/", movie.ID)
+	data := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(movie.PosterURL))
 	data.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("Кинопоиск", link),
+			tgbotapi.NewInlineKeyboardButtonURL("Ссылка", movie.MovieURL),
 		),
 	)
 	caption := fmt.Sprintf("%s (%s) %d, Рейтинг: %.1f", movie.Name, movie.EngName, movie.Year, movie.Rating)
 
 	data.Caption = caption
-	_, err = b.Send(data)
-	return err
-}
-
-func (b *Bot) SendActorWithPhoto(chatID int64, photo domain.PhotoData) (int, error) {
-	log.Printf("Пытаюсь отправить фото по URL: %s", photo.URL)
-	data := tgbotapi.NewPhoto(chatID, tgbotapi.FileURL(photo.URL))
-	link := fmt.Sprintf("https://www.kinopoisk.ru/name/%d/", photo.ID)
-	data.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("Кинопоиск", link),
-			tgbotapi.NewInlineKeyboardButtonData("Выбрать", strconv.Itoa(photo.ID)),
-		),
-	)
-	data.Caption = photo.Caption
-	sentMsg, err := b.Send(data)
-	if err != nil {
-		return 0, err
-	}
-	state := b.userStates.GetByID(chatID)
-	state.SentMediaMessages = append(state.SentMediaMessages, sentMsg.MessageID)
-	return sentMsg.MessageID, nil
-}
-
-func (b *Bot) ClearPreviousMedia(chatID int64) error {
-	state := b.userStates.GetByID(chatID)
-
-	for _, msgID := range state.SentMediaMessages {
-		if err := b.DeletePhotoMessage(chatID, msgID); err != nil {
-			log.Printf("Ошибка удаления сообщения %d: %v", msgID, err)
-		}
-	}
-	state.SentMediaMessages = nil
-
-	return nil
-}
-
-func (b *Bot) DeletePhotoMessage(chatID int64, messageID int) error {
-	deleteMsg := tgbotapi.NewDeleteMessage(chatID, messageID)
-	_, err := b.Request(deleteMsg)
+	_, err := b.Send(data)
 	return err
 }

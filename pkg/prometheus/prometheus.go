@@ -1,6 +1,8 @@
 package prometheus
 
-import "github.com/prometheus/client_golang/prometheus"
+import (
+	"github.com/prometheus/client_golang/prometheus"
+)
 
 var (
 	CommandCounter = prometheus.NewCounterVec(
@@ -14,7 +16,7 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "bot_command_duration_seconds",
 			Help:    "Time taken to process command",
-			Buckets: []float64{0.1, 0.5, 1, 2, 5},
+			Buckets: []float64{0.01, 0.1, 0.5, 1, 2, 5},
 		},
 		[]string{"command"},
 	)
@@ -30,7 +32,7 @@ var (
 			Name: "bot_api_failures_total",
 			Help: "Count of failed API calls",
 		},
-		[]string{"method"},
+		[]string{"status"},
 	)
 
 	MessagesSent = prometheus.NewCounterVec(
@@ -38,16 +40,24 @@ var (
 			Name: "bot_messages_sent_total",
 			Help: "Count of sent messages",
 		},
-		[]string{"type"}, // text, image, etc.
+		[]string{"status"}, // ok, error
+	)
+	CacheOperations = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "cache_operations_total",
+			Help: "Cache operations",
+		},
+		[]string{"status"},
 	)
 )
 
-func Init() {
+func init() {
 	prometheus.MustRegister(
 		CommandCounter,
 		CommandDuration,
 		ActiveUsers,
 		APIFailures,
 		MessagesSent,
+		CacheOperations,
 	)
 }

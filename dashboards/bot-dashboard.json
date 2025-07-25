@@ -1,0 +1,109 @@
+{
+  "title": "Bot Performance Monitoring",
+  "description": "Dashboard for tracking bot metrics",
+  "tags": ["bot", "prometheus", "monitoring"],
+  "timezone": "browser",
+  "editable": true,
+  "gnetId": null,
+  "uid": "bot-monitoring",
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "title": "Command Processing Rate",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "targets": [{
+        "expr": "sum(rate(bot_commands_total[1m])) by (command)",
+        "legendFormat": "{{command}}"
+      }],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto"
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "title": "Command Duration (95th percentile)",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [{
+        "expr": "histogram_quantile(0.95, sum(rate(bot_command_duration_seconds_bucket[5m])) by (le, command))",
+        "legendFormat": "{{command}} - p95"
+      }],
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list" }
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "title": "Active Users",
+      "type": "gauge",
+      "datasource": "Prometheus",
+      "targets": [{
+        "expr": "bot_active_users_total"
+      }],
+      "gridPos": {"h": 8, "w": 6, "x": 0, "y": 8}
+    },
+    {
+      "title": "API Failures",
+      "type": "piechart",
+      "datasource": "Prometheus",
+      "targets": [{
+        "expr": "sum(rate(bot_api_failures_total[1m])) by (status)",
+        "legendFormat": "{{status}}"
+      }],
+      "gridPos": {"h": 8, "w": 10, "x": 6, "y": 8}
+    },
+    {
+      "title": "Messages Sent Status",
+      "type": "barchart",
+      "datasource": "Prometheus",
+      "targets": [{
+        "expr": "sum(rate(bot_messages_sent_total[1m])) by (status)",
+        "legendFormat": "{{status}}"
+      }],
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8}
+    },
+    {
+      "title": "Cache Hit/Miss Ratio",
+      "type": "timeseries",
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(rate(cache_operations_total{status=\"hit\"}[1m]))",
+          "legendFormat": "Hits"
+        },
+        {
+          "expr": "sum(rate(cache_operations_total{status=\"miss\"}[1m]))",
+          "legendFormat": "Misses"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+    },
+    {
+      "title": "Cache Efficiency",
+      "type": "stat",
+      "datasource": "Prometheus",
+      "targets": [{
+        "expr": "sum(rate(cache_operations_total{status=\"hit\"}[5m])) / sum(rate(cache_operations_total{status=~\"hit|miss\"}[5m])) * 100",
+        "legendFormat": "Hit Rate"
+      }],
+      "unit": "percent",
+      "gridPos": {"h": 4, "w": 12, "x": 12, "y": 16}
+    }
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "command",
+        "label": "Command",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(bot_commands_total, command)"
+      }
+    ]
+  }
+}

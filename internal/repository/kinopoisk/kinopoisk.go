@@ -3,13 +3,14 @@ package kinopoisk
 import (
 	"KinopoiskTwoActors/configs"
 	"KinopoiskTwoActors/internal/domain"
+	"KinopoiskTwoActors/pkg/prometheus"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"sort"
 	"strings"
 	"time"
 )
@@ -32,10 +33,10 @@ func NewRepo(config *configs.Config) *Repo {
 	}
 }
 
-func (repo *Repo) GetMovieByID(movieID int) (domain.Movie, error) {
+func (repo *Repo) GetMovieByID(ctx context.Context, movieID int) (domain.Movie, error) {
 	req := fmt.Sprintf("movie/%d", movieID)
 
-	resp, err := repo.doRequest(req)
+	resp, err := repo.doRequest(ctx, req)
 	if err != nil {
 		return domain.Movie{}, err
 	}
@@ -59,21 +60,22 @@ func (repo *Repo) GetMovieByID(movieID int) (domain.Movie, error) {
 	}
 
 	return domain.Movie{
-		ID:      movieInfo.ID,
-		Name:    movieInfo.Name,
-		EngName: movieInfo.AltName,
-		Poster:  movieInfo.Poster.Url,
-		Rating:  movieInfo.Rating.Kp,
-		Year:    movieInfo.Year,
+		ID:        movieInfo.ID,
+		Name:      movieInfo.Name,
+		EngName:   movieInfo.AltName,
+		PosterURL: movieInfo.Poster.Url,
+		Rating:    movieInfo.Rating.Kp,
+		Year:      movieInfo.Year,
+		MovieURL:  GetFilmURL(movieInfo.ID),
 	}, nil
 
 }
 
-func (repo *Repo) GetMoviesIDByActorID(actorID int) ([]int, error) {
+func (repo *Repo) GetMoviesIDByActorID(ctx context.Context, actorID int) ([]int, error) {
 
 	req := fmt.Sprintf("person/%d", actorID)
 
-	resp, err := repo.doRequest(req)
+	resp, err := repo.doRequest(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -100,35 +102,35 @@ func (repo *Repo) GetMoviesIDByActorID(actorID int) ([]int, error) {
 
 }
 
-func (repo *Repo) SearchActors(query string) ([]domain.Actor, error) {
+func (repo *Repo) SearchActors(ctx context.Context, query string) ([]domain.Actor, error) {
 	encodedQuery := url.QueryEscape(query)
 	req := fmt.Sprintf("person/search?page=1&limit=20&query=%s", encodedQuery)
 
-	resp, err := repo.doRequest(req)
+	resp, err := repo.doRequest(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 
-	var actors struct {
+	var response struct {
 		Docs []domain.Actor `json:"docs"`
 	}
-	if err = json.NewDecoder(strings.NewReader(string(resp))).Decode(&actors); err != nil {
+	if err = json.NewDecoder(strings.NewReader(string(resp))).Decode(&response); err != nil {
 		return nil, err
 	}
 
-	filtered := filteringActors(actors.Docs)
-	result := make([]domain.Actor, 0, 3)
-	if len(filtered) >= 3 {
-		result = append(result, filtered[:3]...)
-	} else {
-		result = append(result, filtered...)
+	for v, actor := range response.Docs {
+		response.Docs[v].ActorURL = GetActorURL(actor.ID)
+		if strings.HasPrefix(actor.PhotoURL, "https:https://") {
+			response.Docs[v].PhotoURL = strings.TrimPrefix(actor.PhotoURL, "https:")
+		}
 	}
-	return result, nil
+
+	return response.Docs, nil
 }
 
-func (repo *Repo) doRequest(endpoint string) ([]byte, error) {
+func (repo *Repo) doRequest(ctx context.Context, endpoint string) ([]byte, error) {
 	const op = "Repo.doRequest"
-	req, err := http.NewRequest("GET", repo.Path+endpoint, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", repo.Path+endpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("%s: failed to create request:%w", op, err)
 	}
@@ -139,6 +141,7 @@ func (repo *Repo) doRequest(endpoint string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: request failed: %w", op, err)
 	}
+	prometheus.APIFailures.WithLabelValues(resp.Status).Inc()
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
@@ -149,18 +152,10 @@ func (repo *Repo) doRequest(endpoint string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-func filteringActors(actors []domain.Actor) []domain.Actor {
-	filtered := make([]domain.Actor, 0)
+func GetActorURL(actorID int) string {
+	return fmt.Sprintf("https://www.kinopoisk.ru/name/%d/", actorID)
+}
 
-	for _, actor := range actors {
-		if actor.Photo != "" && actor.Name != "" {
-			filtered = append(filtered, actor)
-		}
-	}
-
-	sort.Slice(filtered, func(i, j int) bool {
-		return len(filtered[i].Movies) < len(filtered[j].Movies)
-	})
-
-	return filtered
+func GetFilmURL(actorID int) string {
+	return fmt.Sprintf("https://www.kinopoisk.ru/film/%d/", actorID)
 }

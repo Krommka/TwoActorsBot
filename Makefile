@@ -5,7 +5,10 @@ local:
 	go run cmd/bot.go -env local
 
 run:
-	docker-compose up -d
+	docker compose -p kinopoisktwoactors up -d
+
+stop:
+	docker compose -p kinopoisktwoactors stop
 
 build:
 	docker compose build

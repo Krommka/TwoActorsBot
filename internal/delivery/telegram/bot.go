@@ -2,91 +2,84 @@ package telegram
 
 import (
 	"KinopoiskTwoActors/configs"
-	"KinopoiskTwoActors/internal/repository/userState"
-	"KinopoiskTwoActors/internal/usecase"
+	"KinopoiskTwoActors/pkg/prometheus"
 	"context"
-	"fmt"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-	"log"
 	"log/slog"
 	"net/http"
-	"strings"
 )
 
 type Bot struct {
 	*tgbotapi.BotAPI
-	repo       *usecase.ActorFilmRepository
-	userStates *userState.UserStates
-	//mu         sync.RWMutex
-	logger *slog.Logger
+	StateProvider
+	ActorProvider
+	FilmProvider
+	log *slog.Logger
 }
 
-func NewBot(ctx context.Context, config *configs.Config, userStates *userState.UserStates, repo *usecase.ActorFilmRepository, log *slog.Logger) (*Bot, error) {
+func NewBot(config *configs.Config, userStates StateProvider,
+	actor ActorProvider, film FilmProvider, log *slog.Logger) (*Bot, error) {
 
 	api, err := tgbotapi.NewBotAPI(config.TG.Token)
-	api.Client = &http.Client{
-		Timeout: config.TG.ConnectionTimeout,
-	}
 	if err != nil {
 		return nil, err
 	}
+	api.Client = &http.Client{
+		Timeout: config.TG.ConnectionTimeout,
+	}
 
-	return &Bot{api, repo, userStates, log}, nil
+	return &Bot{api, userStates, actor, film, log}, nil
 }
 
-func (b *Bot) wrapError(chatID int64, op, msg string, err error) error {
-	sendErr := b.SendMessage(chatID, "Ошибка: "+msg)
-	if sendErr != nil {
-		log.Printf("%s: ошибка отправки сообщения: %v", op, sendErr)
-	}
-	if err != nil {
-		return fmt.Errorf("%s: %s: %w", op, msg, err)
-	}
-	return fmt.Errorf("%s: %s", op, msg)
-}
-
-func (b *Bot) SendMessage(chatID int64, text string) error {
-	if len(text) > 4000 {
-		text = text[:4000] + "..."
-	}
-	msg := tgbotapi.NewMessage(chatID, text)
-	_, err := b.Send(msg)
-	if err != nil {
-		log.Printf("Ошибка отправки сообщения в чат %d: %v", chatID, err)
-	}
-	return err
-}
-
-func (b *Bot) Run() {
+func (b *Bot) Run(ctx context.Context) {
 	u := tgbotapi.NewUpdate(0)
 	updates := b.GetUpdatesChan(u)
 
 	for update := range updates {
-		switch {
-		case update.CallbackQuery != nil:
-			chatID := update.CallbackQuery.Message.Chat.ID
-			data := update.CallbackQuery.Data
-			b.HandleCallback(chatID, data, update.CallbackQuery.ID, update.CallbackQuery.Message.MessageID)
-
-		case update.Message == nil:
-			continue
-
-		case update.Message.IsCommand():
-			command := update.Message.Command()
-			args := update.Message.CommandArguments()
-			b.HandleCommand(update.Message.Chat.ID, command, args)
-
+		select {
+		case <-ctx.Done():
+			return
 		default:
-			text := strings.TrimSpace(update.Message.Text)
-			b.HandleSearchByTwoActors(update.Message.Chat.ID, text)
+			b.handleUpdate(ctx, update)
 		}
 	}
 }
 
 func (b *Bot) Stop(ctx context.Context) {
-	ids := b.userStates.GetCurrentStatesID()
+	ids := b.GetCurrentStatesID(ctx)
 	for _, id := range ids {
-		b.SendMessage(id, "Connection closed")
+		b.SendMessage(ctx, id, "Соединение разорвано")
+	}
+}
+
+func (b *Bot) SendMessage(ctx context.Context, chatID int64, text string) {
+	if len(text) > 4000 {
+		text = text[:4000] + "..."
+	}
+	done := make(chan error, 1)
+	msg := tgbotapi.NewMessage(chatID, text)
+
+	go func() {
+		_, err := b.Send(msg)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			prometheus.MessagesSent.WithLabelValues("error").Inc()
+			b.log.Error("Ошибка отправки сообщения в чат",
+				err,
+				"text", text,
+				chatIDKey, chatID,
+				correlationIDKey, ctx.Value(correlationIDKey))
+		} else {
+			prometheus.MessagesSent.WithLabelValues("ok").Inc()
+		}
+	case <-ctx.Done():
+		b.log.Error("Ошибка отправки сообщения в чат: context timeout",
+			chatIDKey, chatID,
+			correlationIDKey, ctx.Value(correlationIDKey))
 	}
 
 }
@@ -95,4 +88,26 @@ func (b *Bot) AnswerCallbackQuery(callbackID string, text string) error {
 	cfg := tgbotapi.NewCallback(callbackID, text)
 	_, err := b.Request(cfg)
 	return err
+}
+
+func (b *Bot) DeleteMessage(chatID int64, messageID int) error {
+	deleteMsg := tgbotapi.NewDeleteMessage(chatID, messageID)
+	_, err := b.Request(deleteMsg)
+	return err
+}
+
+func (b *Bot) ClearPreviousMedia(ctx context.Context, chatID int64) error {
+	state := b.GetStateByID(ctx, chatID)
+	b.log.Debug("Очистка предыдущих медиа", chatIDKey, chatID,
+		correlationIDKey, ctx.Value(correlationIDKey))
+
+	for _, msgID := range state.SentMediaMessages {
+		if err := b.DeleteMessage(chatID, msgID); err != nil {
+			b.log.Debug("Ошибка удаления сообщения", "msgID", msgID, chatIDKey, chatID,
+				correlationIDKey, ctx.Value(correlationIDKey))
+		}
+	}
+	state.SentMediaMessages = nil
+
+	return nil
 }

@@ -19,11 +19,15 @@ func NewLogger(cfg *configs.Config) *slog.Logger {
 
 	switch cfg.Env {
 	case envLocal:
+		multiWriter, err := newMultiWriter("logs/bot.log")
 		logger = slog.New(
-			slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+			slog.NewJSONHandler(multiWriter, &slog.HandlerOptions{
 				Level:     slog.LevelDebug,
 				AddSource: true,
 			}))
+		if err != nil {
+			logger.Error("Error creating log file: ", "error", err)
+		}
 	case envDev:
 		multiWriter, err := newMultiWriter("/var/log/telegram-bot.log")
 		logger = slog.New(
@@ -38,7 +42,7 @@ func NewLogger(cfg *configs.Config) *slog.Logger {
 		multiWriter, err := newMultiWriter("/var/log/telegram-bot.log")
 		logger = slog.New(
 			slog.NewJSONHandler(multiWriter, &slog.HandlerOptions{
-				Level:     slog.LevelDebug,
+				Level:     slog.LevelInfo,
 				AddSource: true,
 			}))
 		if err != nil {
@@ -50,7 +54,7 @@ func NewLogger(cfg *configs.Config) *slog.Logger {
 }
 
 func newMultiWriter(path string) (io.Writer, error) {
-	logFile, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	logFile, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0660)
 	if err != nil {
 		return os.Stdout, err
 	}

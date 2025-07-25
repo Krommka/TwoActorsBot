@@ -5,12 +5,24 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"strconv"
 	"time"
 )
 
 type KinopoiskConfig struct {
 	Token string `validate:"required"`
 	Path  string `validate:"required"`
+}
+
+type RedisConfig struct {
+	Host         string        `validate:"required"`
+	DB           int           `validate:"required"`
+	User         string        `validate:"required"`
+	Password     string        `validate:"required"`
+	MaxRetries   int           `validate:"required"`
+	DialTimeout  time.Duration `validate:"required"`
+	ReadTimeout  time.Duration `validate:"required"`
+	WriteTimeout time.Duration `validate:"required"`
 }
 
 type TelegramConfig struct {
@@ -21,6 +33,7 @@ type TelegramConfig struct {
 type Config struct {
 	KP  KinopoiskConfig
 	TG  TelegramConfig
+	RD  RedisConfig
 	Env string
 }
 
@@ -40,7 +53,17 @@ func MustLoad(loader loader.ConfigLoader) *Config {
 		},
 		TG: TelegramConfig{
 			Token:             envs["TELEGRAM_TOKEN"],
-			ConnectionTimeout: getEnvAsDuration(envs["TELEGRAM_CONNECTION_TIMEOUT"], 10*time.Second),
+			ConnectionTimeout: getEnvAsDuration(envs["TELEGRAM_CONNECTION_TIMEOUT"], 5*time.Second),
+		},
+		RD: RedisConfig{
+			Host:         envs["REDIS_HOST"],
+			DB:           getEnvAsInt(envs["REDIS_DB"], 0),
+			User:         envs["REDIS_USER"],
+			Password:     envs["REDIS_PASSWORD"],
+			MaxRetries:   getEnvAsInt(envs["REDIS_MAX_RETRIES"], 3),
+			DialTimeout:  getEnvAsDuration(envs["REDIS_DIAL_TIMEOUT"], 5*time.Second),
+			ReadTimeout:  getEnvAsDuration(envs["REDIS_READ_TIMEOUT"], 5*time.Second),
+			WriteTimeout: getEnvAsDuration(envs["REDIS_WRITE_TIMEOUT"], 5*time.Second),
 		},
 		Env: *env,
 	}
@@ -66,7 +89,20 @@ func getEnvAsDuration(strValue string, defaultValue time.Duration) time.Duration
 	}
 	value, err := time.ParseDuration(strValue)
 	if err != nil {
-		log.Printf("Invalid value for %s, using default: %v", strValue, defaultValue)
+		log.Printf("%s:Invalid value for %s, using default: %v", op, strValue, defaultValue)
+		return defaultValue
+	}
+	return value
+}
+
+func getEnvAsInt(strValue string, defaultValue int) int {
+	const op = "configs.getEnvAsInt"
+	if strValue == "" {
+		return defaultValue
+	}
+	value, err := strconv.Atoi(strValue)
+	if err != nil {
+		log.Printf("%s:Invalid value for %s, using default: %v", op, strValue, defaultValue)
 		return defaultValue
 	}
 	return value

@@ -8,6 +8,8 @@ services:
       - ./logs:/var/log
     ports:
       - "8080:8080"
+    depends_on:
+      - redis
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8080/health" ]
       interval: 30s
@@ -43,10 +45,30 @@ services:
       - "3000:3000"
     depends_on:
       - loki
+      - prometheus
+    environment:
+      - GF_INSTALL_PLUGINS=grafana-clock-panel
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
     volumes:
       - grafanadata:/var/lib/grafana
+      - ./grafana-provisioning:/etc/grafana/provisioning
+      - ./dashboards:/var/lib/grafana/dashboards
+
+  redis:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 3
 
 volumes:
   grafanadata:
   prometheusdata:
+  redisdata:
 
