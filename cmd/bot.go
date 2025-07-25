@@ -28,7 +28,7 @@ func main() {
 	//	log.Fatal(err)
 	//}
 	//
-	//f, err := os.Create(filepath.Join(wd, "0004_profiling/01_collect_profile/cpu.out"))
+	//f, err := os.Create(filepath.Join(wd, "profiling/cpu.out"))
 	//
 	//if err != nil {
 	//	log.Fatal(err)
