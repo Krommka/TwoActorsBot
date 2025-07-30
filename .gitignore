@@ -60,3 +60,5 @@ dkms.conf
 !go.mod
 coverage/
 profiling/.env
+
+.env
